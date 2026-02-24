@@ -1,0 +1,11 @@
+[project]
+name = "stable-diffusion"
+version = "0.1.0"
+description = "Stable Diffusion workspace"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    # 添加项目特定依赖
+]
