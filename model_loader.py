@@ -106,7 +106,8 @@ def load_from_standard_weights(
             print("运行: pip install safetensors")
             raise
     else:
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        # PyTorch 2.6+ 需要设置 weights_only=False 来加载包含 PyTorch Lightning 的 checkpoint
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         # 获取 state_dict
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
@@ -122,6 +123,12 @@ def load_from_standard_weights(
         "decoder": VAE_Decoder().to(device),
         "diffusion": Diffusion().to(device),
     }
+
+    # 调试：打印前 20 个 keys 来检查前缀
+    print("\n调试信息 - 权重文件中的前 20 个 keys:")
+    for i, key in enumerate(list(state_dict.keys())[:20]):
+        print(f"  {i+1}. {key}")
+    print()
 
     # 加载 CLIP 权重
     print("加载 CLIP 权重...")
