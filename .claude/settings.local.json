@@ -3,7 +3,8 @@
     "allow": [
       "mcp__tavily__tavily_crawl",
       "mcp__tavily__tavily_extract",
-      "Bash(~/.venvs/ml-base/bin/python -m pip list)"
+      "Bash(~/.venvs/ml-base/bin/python -m pip list)",
+      "Bash(python -m py_compile:*)"
     ]
   }
 }
