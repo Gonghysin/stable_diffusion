@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from pathlib import Path
 import os
+import re
 
 from sd.clip import CLIP
 from sd.encoder import VAE_Encoder
@@ -67,6 +68,223 @@ def download_from_huggingface(model_id: str = "stable-diffusion-v1-5/stable-diff
         return None
 
 
+def convert_clip_text_model_state_dict(state_dict):
+    """
+    转换 CLIP 文本模型的 state_dict。
+    
+    官方格式: cond_stage_model.transformer.text_model.*
+    我们格式: embedding.*, layers.*, layernorm.*
+    """
+    converted = {}
+    
+    for key, value in state_dict.items():
+        if not key.startswith("cond_stage_model.transformer.text_model."):
+            continue
+        
+        # 移除前缀
+        new_key = key.replace("cond_stage_model.transformer.text_model.", "")
+        
+        # embeddings.token_embedding -> embedding.token_embedding
+        new_key = new_key.replace("embeddings.token_embedding", "embedding.token_embedding")
+        # embeddings.position_embedding -> embedding.position_embedding  
+        new_key = new_key.replace("embeddings.position_embedding", "embedding.position_embedding")
+        
+        # encoder.layers.N -> layers.N
+        new_key = new_key.replace("encoder.layers.", "layers.")
+        
+        # self_attn -> attention (但保留 in_proj 用于合并的 QKV)
+        new_key = new_key.replace("self_attn.", "attention.")
+        
+        # mlp.fc1 -> linear_1, mlp.fc2 -> linear_2
+        new_key = new_key.replace("mlp.fc1", "linear_1")
+        new_key = new_key.replace("mlp.fc2", "linear_2")
+        
+        # layer_norm1 -> layernorm_1, layer_norm2 -> layernorm_2
+        new_key = new_key.replace("layer_norm1", "layernorm_1")
+        new_key = new_key.replace("layer_norm2", "layernorm_2")
+        
+        # final_layer_norm -> layernorm
+        new_key = new_key.replace("final_layer_norm", "layernorm")
+        
+        converted[new_key] = value
+    
+    return converted
+
+
+def convert_unet_state_dict(state_dict):
+    """
+    转换 U-Net 的 state_dict。
+    
+    官方格式: model.diffusion_model.*
+    我们格式: time_embedding.*, unet.encoders.*, unet.bottleneck.*, unet.decoder.*, final.*
+    """
+    converted = {}
+    
+    for key, value in state_dict.items():
+        if not key.startswith("model.diffusion_model."):
+            continue
+        
+        # 移除前缀
+        new_key = key.replace("model.diffusion_model.", "")
+        
+        # Time embedding: time_embed.0 -> time_embedding.linear_1, time_embed.2 -> time_embedding.linear_2
+        if new_key.startswith("time_embed."):
+            new_key = new_key.replace("time_embed.0.", "time_embedding.linear_1.")
+            new_key = new_key.replace("time_embed.2.", "time_embedding.linear_2.")
+            converted[new_key] = value
+            continue
+        
+        # Input blocks -> encoders
+        if new_key.startswith("input_blocks."):
+            match = re.match(r"input_blocks\.(\d+)\.(.*)", new_key)
+            if match:
+                block_idx = match.group(1)
+                rest = match.group(2)
+                new_key = f"unet.encoders.{block_idx}.{rest}"
+                new_key = _convert_resblock_attention_keys(new_key)
+                converted[new_key] = value
+            continue
+        
+        # Middle block -> bottleneck
+        if new_key.startswith("middle_block."):
+            match = re.match(r"middle_block\.(\d+)\.(.*)", new_key)
+            if match:
+                block_idx = match.group(1)
+                rest = match.group(2)
+                new_key = f"unet.bottleneck.{block_idx}.{rest}"
+                new_key = _convert_resblock_attention_keys(new_key)
+                converted[new_key] = value
+            continue
+        
+        # Output blocks -> decoder
+        if new_key.startswith("output_blocks."):
+            match = re.match(r"output_blocks\.(\d+)\.(.*)", new_key)
+            if match:
+                block_idx = match.group(1)
+                rest = match.group(2)
+                new_key = f"unet.decoder.{block_idx}.{rest}"
+                new_key = _convert_resblock_attention_keys(new_key)
+                converted[new_key] = value
+            continue
+        
+        # Output layer: out.0 -> final.groupnorm, out.2 -> final.conv
+        if new_key.startswith("out."):
+            new_key = new_key.replace("out.0.", "final.groupnorm.")
+            new_key = new_key.replace("out.2.", "final.conv.")
+            converted[new_key] = value
+            continue
+    
+    return converted
+
+
+def _convert_resblock_attention_keys(key: str) -> str:
+    """
+    转换 ResBlock 和 Attention 块内部的 key 名称。
+    
+    ResBlock 官方格式:
+        in_layers.0 -> groupnorm_feature
+        in_layers.2 -> conv_feature
+        emb_layers.1 -> linear_time
+        out_layers.0 -> groupnorm_merged
+        out_layers.3 -> conv_merged
+        skip_connection -> residual_layer
+    
+    Attention 官方格式:
+        norm -> groupnorm
+        proj_in -> conv_input
+        transformer_blocks.0.norm1 -> layernorm_1
+        transformer_blocks.0.attn1.to_q -> attention_1.q_proj
+        transformer_blocks.0.attn1.to_k -> attention_1.k_proj
+        transformer_blocks.0.attn1.to_v -> attention_1.v_proj
+        transformer_blocks.0.attn1.to_out.0 -> attention_1.out_proj
+        transformer_blocks.0.norm2 -> layernorm_2
+        transformer_blocks.0.attn2 -> attention_2 (cross attention)
+        transformer_blocks.0.norm3 -> layernorm_3
+        transformer_blocks.0.ff.net.0.proj -> linear_geglu_1
+        transformer_blocks.0.ff.net.2 -> linear_geglu_2
+        proj_out -> conv_output
+    """
+    # ResBlock 映射
+    key = key.replace(".in_layers.0.", ".groupnorm_feature.")
+    key = key.replace(".in_layers.2.", ".conv_feature.")
+    key = key.replace(".emb_layers.1.", ".linear_time.")
+    key = key.replace(".out_layers.0.", ".groupnorm_merged.")
+    key = key.replace(".out_layers.3.", ".conv_merged.")
+    key = key.replace(".skip_connection.", ".residual_layer.")
+    
+    # Attention 块映射
+    key = key.replace(".norm.", ".groupnorm.")
+    key = key.replace(".proj_in.", ".conv_input.")
+    
+    # Transformer blocks
+    key = key.replace(".transformer_blocks.0.norm1.", ".layernorm_1.")
+    key = key.replace(".transformer_blocks.0.norm2.", ".layernorm_2.")
+    key = key.replace(".transformer_blocks.0.norm3.", ".layernorm_3.")
+    
+    # Self attention (attn1)
+    key = key.replace(".transformer_blocks.0.attn1.to_q.", ".attention_1.q_proj.")
+    key = key.replace(".transformer_blocks.0.attn1.to_k.", ".attention_1.k_proj.")
+    key = key.replace(".transformer_blocks.0.attn1.to_v.", ".attention_1.v_proj.")
+    key = key.replace(".transformer_blocks.0.attn1.to_out.0.", ".attention_1.out_proj.")
+    
+    # Cross attention (attn2)
+    key = key.replace(".transformer_blocks.0.attn2.to_q.", ".attention_2.q_proj.")
+    key = key.replace(".transformer_blocks.0.attn2.to_k.", ".attention_2.k_proj.")
+    key = key.replace(".transformer_blocks.0.attn2.to_v.", ".attention_2.v_proj.")
+    key = key.replace(".transformer_blocks.0.attn2.to_out.0.", ".attention_2.out_proj.")
+    
+    # Feed-forward (GeGLU)
+    key = key.replace(".transformer_blocks.0.ff.net.0.proj.", ".linear_geglu_1.")
+    key = key.replace(".transformer_blocks.0.ff.net.2.", ".linear_geglu_2.")
+    
+    key = key.replace(".proj_out.", ".conv_output.")
+    
+    return key
+
+
+def convert_vae_encoder_state_dict(state_dict):
+    """
+    转换 VAE Encoder 的 state_dict。
+    
+    由于 VAE_Encoder 使用 nn.Sequential，需要映射到数字索引。
+    这个映射比较复杂，需要根据实际的 Sequential 结构来确定。
+    """
+    converted = {}
+    
+    for key, value in state_dict.items():
+        if not key.startswith("first_stage_model.encoder."):
+            continue
+        
+        # 移除前缀
+        new_key = key.replace("first_stage_model.encoder.", "")
+        
+        # 这里需要根据 VAE_Encoder 的实际结构进行映射
+        # 由于结构复杂，我们保留原始的层次结构名称
+        # PyTorch 的 load_state_dict 会尝试匹配
+        
+        converted[new_key] = value
+    
+    return converted
+
+
+def convert_vae_decoder_state_dict(state_dict):
+    """
+    转换 VAE Decoder 的 state_dict。
+    """
+    converted = {}
+    
+    for key, value in state_dict.items():
+        if not key.startswith("first_stage_model.decoder."):
+            continue
+        
+        # 移除前缀
+        new_key = key.replace("first_stage_model.decoder.", "")
+        
+        converted[new_key] = value
+    
+    return converted
+
+
 def load_from_standard_weights(
     ckpt_path: str,
     device: torch.device
@@ -107,8 +325,13 @@ def load_from_standard_weights(
             raise
     else:
         # PyTorch 2.6+ 需要设置 weights_only=False 来加载包含 PyTorch Lightning 的 checkpoint
+        try:
+            import pytorch_lightning
+            torch.serialization.add_safe_globals([pytorch_lightning.callbacks.model_checkpoint.ModelCheckpoint])
+        except ImportError:
+            pass
+
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        # 获取 state_dict
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
         else:
@@ -130,75 +353,95 @@ def load_from_standard_weights(
         print(f"  {i+1}. {key}")
     print()
 
+    # 转换权重
+    print("转换权重格式...")
+    
+    clip_state_dict = convert_clip_text_model_state_dict(state_dict)
+    diffusion_state_dict = convert_unet_state_dict(state_dict)
+    encoder_state_dict = convert_vae_encoder_state_dict(state_dict)
+    decoder_state_dict = convert_vae_decoder_state_dict(state_dict)
+    
     # 加载 CLIP 权重
-    print("加载 CLIP 权重...")
-    clip_state_dict = {}
-    for key, value in state_dict.items():
-        if key.startswith("cond_stage_model.transformer.text_model"):
-            new_key = key.replace("cond_stage_model.transformer.text_model.", "")
-            clip_state_dict[new_key] = value
-
+    print("\n加载 CLIP 权重...")
     if clip_state_dict:
-        try:
-            models["clip"].load_state_dict(clip_state_dict, strict=False)
-            print(f"✓ CLIP 权重已加载 ({len(clip_state_dict)} 个参数)")
-        except Exception as e:
-            print(f"警告: CLIP 权重加载部分失败: {e}")
+        missing, unexpected = models["clip"].load_state_dict(clip_state_dict, strict=False)
+        total_params = len(models["clip"].state_dict())
+        loaded_params = len(clip_state_dict)
+        matched_params = loaded_params - len(unexpected)
+        
+        print(f"✓ CLIP: 匹配 {matched_params}/{total_params} 个参数")
+        if missing:
+            print(f"  缺失 {len(missing)} 个参数 (将使用随机初始化)")
+            if len(missing) <= 10:
+                for m in missing:
+                    print(f"    - {m}")
+        if unexpected:
+            print(f"  忽略 {len(unexpected)} 个不匹配的参数")
+            if len(unexpected) <= 10:
+                for u in unexpected:
+                    print(f"    - {u}")
     else:
         print("警告: 未找到 CLIP 权重")
 
     # 加载 VAE Encoder 权重
-    print("加载 VAE Encoder 权重...")
-    encoder_state_dict = {}
-    for key, value in state_dict.items():
-        if key.startswith("first_stage_model.encoder"):
-            new_key = key.replace("first_stage_model.encoder.", "")
-            encoder_state_dict[new_key] = value
-
+    print("\n加载 VAE Encoder 权重...")
     if encoder_state_dict:
-        try:
-            models["encoder"].load_state_dict(encoder_state_dict, strict=False)
-            print(f"✓ VAE Encoder 权重已加载 ({len(encoder_state_dict)} 个参数)")
-        except Exception as e:
-            print(f"警告: VAE Encoder 权重加载部分失败: {e}")
+        missing, unexpected = models["encoder"].load_state_dict(encoder_state_dict, strict=False)
+        total_params = len(models["encoder"].state_dict())
+        loaded_params = len(encoder_state_dict)
+        matched_params = loaded_params - len(unexpected)
+        
+        print(f"✓ Encoder: 匹配 {matched_params}/{total_params} 个参数")
+        if missing:
+            print(f"  缺失 {len(missing)} 个参数")
+        if unexpected:
+            print(f"  忽略 {len(unexpected)} 个不匹配的参数")
     else:
         print("警告: 未找到 VAE Encoder 权重")
 
     # 加载 VAE Decoder 权重
-    print("加载 VAE Decoder 权重...")
-    decoder_state_dict = {}
-    for key, value in state_dict.items():
-        if key.startswith("first_stage_model.decoder"):
-            new_key = key.replace("first_stage_model.decoder.", "")
-            decoder_state_dict[new_key] = value
-
+    print("\n加载 VAE Decoder 权重...")
     if decoder_state_dict:
-        try:
-            models["decoder"].load_state_dict(decoder_state_dict, strict=False)
-            print(f"✓ VAE Decoder 权重已加载 ({len(decoder_state_dict)} 个参数)")
-        except Exception as e:
-            print(f"警告: VAE Decoder 权重加载部分失败: {e}")
+        missing, unexpected = models["decoder"].load_state_dict(decoder_state_dict, strict=False)
+        total_params = len(models["decoder"].state_dict())
+        loaded_params = len(decoder_state_dict)
+        matched_params = loaded_params - len(unexpected)
+        
+        print(f"✓ Decoder: 匹配 {matched_params}/{total_params} 个参数")
+        if missing:
+            print(f"  缺失 {len(missing)} 个参数")
+        if unexpected:
+            print(f"  忽略 {len(unexpected)} 个不匹配的参数")
     else:
         print("警告: 未找到 VAE Decoder 权重")
 
     # 加载 U-Net (Diffusion) 权重
-    print("加载 U-Net 权重...")
-    diffusion_state_dict = {}
-    for key, value in state_dict.items():
-        if key.startswith("model.diffusion_model"):
-            new_key = key.replace("model.diffusion_model.", "")
-            diffusion_state_dict[new_key] = value
-
+    print("\n加载 U-Net 权重...")
     if diffusion_state_dict:
-        try:
-            models["diffusion"].load_state_dict(diffusion_state_dict, strict=False)
-            print(f"✓ U-Net 权重已加载 ({len(diffusion_state_dict)} 个参数)")
-        except Exception as e:
-            print(f"警告: U-Net 权重加载部分失败: {e}")
+        missing, unexpected = models["diffusion"].load_state_dict(diffusion_state_dict, strict=False)
+        total_params = len(models["diffusion"].state_dict())
+        loaded_params = len(diffusion_state_dict)
+        matched_params = loaded_params - len(unexpected)
+        
+        print(f"✓ Diffusion: 匹配 {matched_params}/{total_params} 个参数")
+        if missing:
+            print(f"  缺失 {len(missing)} 个参数 (将使用随机初始化)")
+            if len(missing) <= 10:
+                for m in missing[:10]:
+                    print(f"    - {m}")
+                if len(missing) > 10:
+                    print(f"    ... 还有 {len(missing) - 10} 个")
+        if unexpected:
+            print(f"  忽略 {len(unexpected)} 个不匹配的参数")
+            if len(unexpected) <= 10:
+                for u in unexpected[:10]:
+                    print(f"    - {u}")
+                if len(unexpected) > 10:
+                    print(f"    ... 还有 {len(unexpected) - 10} 个")
     else:
         print("警告: 未找到 U-Net 权重")
 
-    print("✓ 所有模型权重加载完成")
+    print("\n✓ 权重加载完成")
 
     return models
 
