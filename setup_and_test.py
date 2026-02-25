@@ -160,9 +160,10 @@ def run_test():
         "main.py",
         "--prompt", "a cat on the moon, digital art",
         "--output", "outputs/test_output.png",
-        "--steps", "20",
+        "--steps", "50",
         "--seed", "42",
-        "--cfg-scale", "7.5"
+        "--cfg-scale", "7.5",
+        "--ckpt", "data/v1-5-pruned-emaonly.ckpt"
     ]
 
     try:
