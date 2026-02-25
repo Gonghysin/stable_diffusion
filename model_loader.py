@@ -245,43 +245,193 @@ def _convert_resblock_attention_keys(key: str) -> str:
 def convert_vae_encoder_state_dict(state_dict):
     """
     转换 VAE Encoder 的 state_dict。
-    
-    由于 VAE_Encoder 使用 nn.Sequential，需要映射到数字索引。
-    这个映射比较复杂，需要根据实际的 Sequential 结构来确定。
+
+    官方结构:
+    - conv_in
+    - down.0.block.0/1 (ResBlocks)
+    - down.0.downsample.conv
+    - down.1.block.0/1
+    - down.1.downsample.conv
+    - down.2.block.0/1
+    - down.2.downsample.conv
+    - mid.block_1/2 (ResBlocks)
+    - mid.attn_1 (Attention)
+    - norm_out
+    - conv_out
+
+    Sequential 索引 (sd/encoder.py):
+    0: Conv2d(3, 128)  # conv_in
+    1: VAE_ResidualBlock(128, 128)  # down.0.block.0
+    2: VAE_ResidualBlock(128, 128)  # down.0.block.1
+    3: Conv2d(128, 128, stride=2)  # down.0.downsample
+    4: VAE_ResidualBlock(128, 256)  # down.1.block.0
+    5: VAE_ResidualBlock(256, 256)  # down.1.block.1
+    6: Conv2d(256, 256, stride=2)  # down.1.downsample
+    7: VAE_ResidualBlock(256, 512)  # down.2.block.0
+    8: VAE_ResidualBlock(512, 512)  # down.2.block.1
+    9: Conv2d(512, 512, stride=2)  # down.2.downsample
+    10-12: VAE_ResidualBlock(512, 512)  # mid.block_1, extra, extra
+    13: VAE_AttentionBlock(512)  # mid.attn_1
+    14: VAE_ResidualBlock(512, 512)  # mid.block_2
+    15: GroupNorm(32, 512)  # norm_out
+    16: SiLU()
+    17: Conv2d(512, 8)  # conv_out
+    18: Conv2d(8, 8)  # quant_conv
     """
     converted = {}
-    
+
+    # 映射表: 官方key -> Sequential索引
+    mapping = {
+        "conv_in": "0",
+        "down.0.block.0": "1",
+        "down.0.block.1": "2",
+        "down.0.downsample.conv": "3",
+        "down.1.block.0": "4",
+        "down.1.block.1": "5",
+        "down.1.downsample.conv": "6",
+        "down.2.block.0": "7",
+        "down.2.block.1": "8",
+        "down.2.downsample.conv": "9",
+        "mid.block_1": "10",
+        "mid.attn_1": "13",
+        "mid.block_2": "14",
+        "norm_out": "15",
+        "conv_out": "17",
+    }
+
     for key, value in state_dict.items():
         if not key.startswith("first_stage_model.encoder."):
             continue
-        
+
         # 移除前缀
-        new_key = key.replace("first_stage_model.encoder.", "")
-        
-        # 这里需要根据 VAE_Encoder 的实际结构进行映射
-        # 由于结构复杂，我们保留原始的层次结构名称
-        # PyTorch 的 load_state_dict 会尝试匹配
-        
-        converted[new_key] = value
-    
+        key_without_prefix = key.replace("first_stage_model.encoder.", "")
+
+        # 查找匹配的映射
+        new_key = None
+        for official_name, seq_idx in mapping.items():
+            if key_without_prefix.startswith(official_name):
+                # 替换前缀
+                remainder = key_without_prefix[len(official_name):]
+
+                # 处理 ResidualBlock 内部的层名称
+                remainder = remainder.replace(".norm1.", ".groupnorm_1.")
+                remainder = remainder.replace(".norm2.", ".groupnorm_2.")
+                remainder = remainder.replace(".conv1.", ".conv_1.")
+                remainder = remainder.replace(".conv2.", ".conv_2.")
+                remainder = remainder.replace(".nin_shortcut.", ".residual_layer.")
+
+                # 处理 AttentionBlock 内部的层名称
+                remainder = remainder.replace(".norm.", ".groupnorm.")
+                remainder = remainder.replace(".q.", ".attention.q_proj.")
+                remainder = remainder.replace(".k.", ".attention.k_proj.")
+                remainder = remainder.replace(".v.", ".attention.v_proj.")
+                remainder = remainder.replace(".proj_out.", ".attention.out_proj.")
+
+                new_key = seq_idx + remainder
+                break
+
+        if new_key:
+            converted[new_key] = value
+
     return converted
 
 
 def convert_vae_decoder_state_dict(state_dict):
     """
     转换 VAE Decoder 的 state_dict。
+
+    官方结构:
+    - conv_in
+    - mid.block_1/2 (ResBlocks)
+    - mid.attn_1 (Attention)
+    - up.0/1/2.block.0/1/2 (ResBlocks)
+    - up.0/1/2.upsample.conv
+    - norm_out
+    - conv_out
+
+    Sequential 索引 (sd/decoder.py):
+    0: Conv2d(4, 4)  # post_quant_conv
+    1: Conv2d(4, 512)  # conv_in
+    2: VAE_ResidualBlock(512, 512)  # mid.block_1
+    3: VAE_AttentionBlock(512)  # mid.attn_1
+    4: VAE_ResidualBlock(512, 512)  # mid.block_2
+    5-7: VAE_ResidualBlock(512, 512)  # extra blocks
+    8: Upsample(scale_factor=2)  # up.2.upsample
+    9: Conv2d(512, 512)  # up.2.upsample.conv
+    10-12: VAE_ResidualBlock(512, 512)  # up.2.block.0/1/2
+    13: Upsample(scale_factor=2)  # up.1.upsample
+    14: Conv2d(512, 512)  # up.1.upsample.conv
+    15: VAE_ResidualBlock(512, 256)  # up.1.block.0
+    16-17: VAE_ResidualBlock(256, 256)  # up.1.block.1/2
+    18: Upsample(scale_factor=2)  # up.0.upsample
+    19: Conv2d(256, 256)  # up.0.upsample.conv
+    20: VAE_ResidualBlock(256, 128)  # up.0.block.0
+    21-22: VAE_ResidualBlock(128, 128)  # up.0.block.1/2
+    23: GroupNorm(32, 128)  # norm_out
+    24: SiLU()
+    25: Conv2d(128, 3)  # conv_out
     """
     converted = {}
-    
+
+    # 映射表: 官方key -> Sequential索引
+    mapping = {
+        "conv_in": "1",
+        "mid.block_1": "2",
+        "mid.attn_1": "3",
+        "mid.block_2": "4",
+        # up.2 (512 -> 512)
+        "up.2.upsample.conv": "9",
+        "up.2.block.0": "10",
+        "up.2.block.1": "11",
+        "up.2.block.2": "12",
+        # up.1 (512 -> 256)
+        "up.1.upsample.conv": "14",
+        "up.1.block.0": "15",
+        "up.1.block.1": "16",
+        "up.1.block.2": "17",
+        # up.0 (256 -> 128)
+        "up.0.upsample.conv": "19",
+        "up.0.block.0": "20",
+        "up.0.block.1": "21",
+        "up.0.block.2": "22",
+        "norm_out": "23",
+        "conv_out": "25",
+    }
+
     for key, value in state_dict.items():
         if not key.startswith("first_stage_model.decoder."):
             continue
-        
+
         # 移除前缀
-        new_key = key.replace("first_stage_model.decoder.", "")
-        
-        converted[new_key] = value
-    
+        key_without_prefix = key.replace("first_stage_model.decoder.", "")
+
+        # 查找匹配的映射
+        new_key = None
+        for official_name, seq_idx in mapping.items():
+            if key_without_prefix.startswith(official_name):
+                # 替换前缀
+                remainder = key_without_prefix[len(official_name):]
+
+                # 处理 ResidualBlock 内部的层名称
+                remainder = remainder.replace(".norm1.", ".groupnorm_1.")
+                remainder = remainder.replace(".norm2.", ".groupnorm_2.")
+                remainder = remainder.replace(".conv1.", ".conv_1.")
+                remainder = remainder.replace(".conv2.", ".conv_2.")
+                remainder = remainder.replace(".nin_shortcut.", ".residual_layer.")
+
+                # 处理 AttentionBlock 内部的层名称
+                remainder = remainder.replace(".norm.", ".groupnorm.")
+                remainder = remainder.replace(".q.", ".attention.q_proj.")
+                remainder = remainder.replace(".k.", ".attention.k_proj.")
+                remainder = remainder.replace(".v.", ".attention.v_proj.")
+                remainder = remainder.replace(".proj_out.", ".attention.out_proj.")
+
+                new_key = seq_idx + remainder
+                break
+
+        if new_key:
+            converted[new_key] = value
+
     return converted
 
 
