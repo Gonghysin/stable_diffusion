@@ -78,13 +78,25 @@ def download_models():
 
         # 下载主权重文件
         print("\n下载 Stable Diffusion v1.5 权重...")
-        ckpt_path = hf_hub_download(
-            repo_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
-            filename="v1-5-pruned-emaonly.ckpt",
-            cache_dir="./data",
-            resume_download=True
-        )
-        print(f"✓ 权重文件: {ckpt_path}")
+
+        # 优先尝试 safetensors 格式
+        try:
+            print("尝试下载 safetensors 格式...")
+            ckpt_path = hf_hub_download(
+                repo_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
+                filename="v1-5-pruned-emaonly.safetensors",
+                cache_dir="./data"
+            )
+            print(f"✓ 权重文件: {ckpt_path}")
+        except Exception as e:
+            print(f"safetensors 下载失败: {e}")
+            print("尝试 ckpt 格式...")
+            ckpt_path = hf_hub_download(
+                repo_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
+                filename="v1-5-pruned-emaonly.ckpt",
+                cache_dir="./data"
+            )
+            print(f"✓ 权重文件: {ckpt_path}")
 
         # 下载 tokenizer 文件
         print("\n下载 CLIP tokenizer...")

@@ -35,12 +35,24 @@ def download_from_huggingface(model_id: str = "stable-diffusion-v1-5/stable-diff
         print(f"从 Hugging Face 下载模型: {model_id}")
         print("这可能需要几分钟时间...")
 
-        # 下载主权重文件
+        # 优先尝试下载 safetensors 格式（更安全、更快）
+        try:
+            print("尝试下载 safetensors 格式...")
+            ckpt_path = hf_hub_download(
+                repo_id=model_id,
+                filename="v1-5-pruned-emaonly.safetensors",
+                cache_dir=cache_dir
+            )
+            print(f"✓ 权重文件已下载到: {ckpt_path}")
+            return ckpt_path
+        except Exception as e:
+            print(f"safetensors 下载失败，尝试 ckpt 格式...")
+
+        # 备用：下载 ckpt 格式
         ckpt_path = hf_hub_download(
             repo_id=model_id,
             filename="v1-5-pruned-emaonly.ckpt",
-            cache_dir=cache_dir,
-            resume_download=True
+            cache_dir=cache_dir
         )
 
         print(f"✓ 权重文件已下载到: {ckpt_path}")
@@ -82,15 +94,25 @@ def load_from_standard_weights(
 
     # 加载 checkpoint
     print("正在加载 checkpoint...")
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
 
-    # 获取 state_dict
-    if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
+    # 检查文件格式
+    if ckpt_path.endswith('.safetensors'):
+        try:
+            from safetensors.torch import load_file
+            state_dict = load_file(ckpt_path, device="cpu")
+            print(f"✓ SafeTensors 文件已加载，包含 {len(state_dict)} 个参数")
+        except ImportError:
+            print("错误: 未安装 safetensors 库")
+            print("运行: pip install safetensors")
+            raise
     else:
-        state_dict = checkpoint
-
-    print(f"✓ Checkpoint 已加载，包含 {len(state_dict)} 个参数")
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        # 获取 state_dict
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+        print(f"✓ Checkpoint 已加载，包含 {len(state_dict)} 个参数")
 
     # 实例化模型
     print("初始化模型...")
