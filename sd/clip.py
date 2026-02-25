@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from attention import SelfAttention
+from .attention import SelfAttention
 
 # 将文本 token 转为向量表示
 class CLIPEmbedding(nn.Module):

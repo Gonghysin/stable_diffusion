@@ -198,19 +198,19 @@ def main():
     print("Stable Diffusion 服务器端部署脚本")
     print("="*60)
 
-    # 检查 Python 版本
-    check_python_version()
+    # # 检查 Python 版本
+    # check_python_version()
 
-    # 安装依赖
-    install_dependencies()
+    # # 安装依赖
+    # install_dependencies()
 
-    # 创建目录
-    create_directories()
+    # # 创建目录
+    # create_directories()
 
-    # 下载模型
-    if not download_models():
-        print("\n错误: 模型下载失败")
-        sys.exit(1)
+    # # 下载模型
+    # if not download_models():
+    #     print("\n错误: 模型下载失败")
+    #     sys.exit(1)
 
     # 检测设备
     device = check_device()
