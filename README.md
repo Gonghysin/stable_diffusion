@@ -20,11 +20,44 @@ main.py              # 命令行推理入口
 
 ## 快速开始
 
-### 安装依赖
+### 方式 1: 自动部署（推荐）
+
+在服务器上运行一键部署脚本：
 
 ```bash
-pip install torch torchvision numpy pillow tqdm transformers
+# Python 版本（推荐）
+python setup_and_test.py
+
+# 或 Bash 版本
+bash setup_and_run.sh
 ```
+
+脚本会自动：
+1. 安装所有依赖
+2. 从 Hugging Face 下载模型权重（约 4GB）
+3. 下载 CLIP tokenizer
+4. 检测可用设备（CUDA/MPS/CPU）
+5. 运行测试生成
+
+### 方式 2: 手动安装
+
+#### 1. 安装依赖
+
+```bash
+pip install torch torchvision numpy pillow tqdm transformers huggingface_hub
+```
+
+#### 2. 下载模型（自动）
+
+首次运行时会自动从 Hugging Face 下载：
+
+```bash
+python main.py --prompt "test" --output test.png
+```
+
+或手动下载到 `data/` 目录：
+- 模型权重: https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5
+- Tokenizer: https://huggingface.co/openai/clip-vit-large-patch14
 
 ### txt2img 生成
 
@@ -112,9 +145,27 @@ start_step = int(steps * (1 - strength))
 
 ## 注意事项
 
-1. **权重加载**: `model_loader.py` 是简化版，需根据实际 checkpoint 实现 key 映射
+1. **权重加载**: 已实现完整的权重加载，支持从 Hugging Face 自动下载
 2. **显存优化**: 使用 `idle_device` 参数节省显存
 3. **性能**: CPU 慢 (~10分钟)，GPU 快 (~10秒)，MPS 中等 (~30秒)
+4. **模型来源**: 使用官方 Stable Diffusion v1.5 权重
+
+## 算力需求
+
+### 推理（生成图像）
+
+| 设备 | 显存/内存 | 速度 | 推荐度 |
+|------|----------|------|--------|
+| RTX 3060 (12GB) | 12GB | ~15秒/张 | ⭐⭐⭐⭐ |
+| RTX 3090 (24GB) | 24GB | ~10秒/张 | ⭐⭐⭐⭐⭐ |
+| M1 Max | 统一内存 | ~30秒/张 | ⭐⭐⭐ |
+| CPU | 32GB RAM | ~10分钟/张 | ⭐ |
+
+### 云算力推荐
+
+- **AutoDL**: RTX 3090 约 2元/小时
+- **Google Colab**: 免费 T4 或 Pro A100
+- **阿里云 PAI**: 按量付费
 
 ## 学习资源
 
