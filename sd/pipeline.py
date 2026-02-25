@@ -109,17 +109,23 @@ def generate(
 
         # 1. CLIP 文本编码
         # (Batch_Size, Seq_Len, Dim)
-        cond_tokens = tokenizer.batch_encode_plus(
-            [prompt], padding="max_length", max_length=77
-        ).input_ids
-        cond_tokens = torch.tensor(cond_tokens, dtype=torch.long, device=device)
+        cond_tokens = tokenizer(
+            [prompt],
+            padding="max_length",
+            max_length=77,
+            truncation=True,
+            return_tensors="pt"
+        ).input_ids.to(device)
         cond_context = clip(cond_tokens)
 
         if do_cfg:
-            uncond_tokens = tokenizer.batch_encode_plus(
-                [uncond_prompt], padding="max_length", max_length=77
-            ).input_ids
-            uncond_tokens = torch.tensor(uncond_tokens, dtype=torch.long, device=device)
+            uncond_tokens = tokenizer(
+                [uncond_prompt],
+                padding="max_length",
+                max_length=77,
+                truncation=True,
+                return_tensors="pt"
+            ).input_ids.to(device)
             uncond_context = clip(uncond_tokens)
             # (2, 77, 768)
             context = torch.cat([cond_context, uncond_context])
